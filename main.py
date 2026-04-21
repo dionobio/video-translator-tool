@@ -6,8 +6,6 @@ PyQt5 desktop application for downloading, translating, and dubbing videos.
 import sys
 import os
 import threading
-import webbrowser
-
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QProgressBar,
@@ -91,28 +89,32 @@ class MainWindow(QMainWindow):
         input_group = QGroupBox("Nguồn Video")
         input_layout = QVBoxLayout(input_group)
 
-        # Download via j2download.com
-        j2_row = QHBoxLayout()
-        j2_row.addWidget(QLabel("Tải video:"))
-        self.btn_j2download = QPushButton("Mở j2download.com để tải video")
-        self.btn_j2download.setToolTip(
-            "Mở trang j2download.com trong trình duyệt.\n"
-            "Dán link video (Douyin, TikTok, YouTube, Bilibili...) vào đó để tải.\n"
-            "Sau khi tải xong, chọn file video bên dưới."
+        # URL input + download via j2download API
+        url_row = QHBoxLayout()
+        url_row.addWidget(QLabel("URL:"))
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText(
+            "Dán link video (Douyin, TikTok, YouTube, Bilibili, RedNote...)"
         )
-        self.btn_j2download.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 8px 20px; }"
+        url_row.addWidget(self.url_input)
+        self.btn_download = QPushButton("Tải Video")
+        self.btn_download.setFixedWidth(120)
+        self.btn_download.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; }"
             "QPushButton:hover { background-color: #1976D2; }"
         )
-        j2_row.addWidget(self.btn_j2download)
-        j2_row.addStretch()
-        input_layout.addLayout(j2_row)
+        self.btn_download.setToolTip(
+            "Tải video qua j2download.com API\n"
+            "Hỗ trợ: Douyin, TikTok, YouTube, Bilibili, RedNote/Xiaohongshu..."
+        )
+        url_row.addWidget(self.btn_download)
+        input_layout.addLayout(url_row)
 
-        # Local file
+        # Or local file
         file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("Chọn video:"))
+        file_row.addWidget(QLabel("Hoặc:"))
         self.file_path_input = QLineEdit()
-        self.file_path_input.setPlaceholderText("Chọn file video đã tải từ máy tính...")
+        self.file_path_input.setPlaceholderText("Chọn file video từ máy tính...")
         self.file_path_input.setReadOnly(True)
         file_row.addWidget(self.file_path_input)
         self.btn_browse = QPushButton("Chọn File")
@@ -387,7 +389,7 @@ class MainWindow(QMainWindow):
         return tab
 
     def _connect_signals(self):
-        self.btn_j2download.clicked.connect(self._on_open_j2download)
+        self.btn_download.clicked.connect(self._on_download)
         self.btn_browse.clicked.connect(self._on_browse_file)
         self.btn_extract.clicked.connect(self._on_extract)
         self.btn_translate.clicked.connect(self._on_translate)
@@ -400,6 +402,8 @@ class MainWindow(QMainWindow):
         self.signals.finished.connect(self._on_task_finished)
         self.signals.error.connect(self._on_error)
 
+        self.url_input.textChanged.connect(lambda _: self._update_button_states())
+
     def _log(self, msg):
         self.log_text.append(msg)
         self.log_text.verticalScrollBar().setValue(
@@ -411,12 +415,14 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy):
         self.progress_bar.setVisible(busy)
+        self.btn_download.setEnabled(not busy)
         self.btn_browse.setEnabled(not busy)
         if not busy:
             self._update_button_states()
 
     def _update_button_states(self):
         has_video = self.current_video_path is not None
+        has_url = bool(self.url_input.text().strip())
         has_segments = self.current_segments is not None
         has_translated = (
             has_segments
@@ -429,7 +435,7 @@ class MainWindow(QMainWindow):
         self.btn_translate.setEnabled(has_segments)
         self.btn_tts.setEnabled(has_translated)
         self.btn_export.setEnabled(has_audio)
-        self.btn_all.setEnabled(has_video)
+        self.btn_all.setEnabled(has_video or has_url)
 
     def _get_api_key(self):
         key = self.api_key_input.text().strip()
@@ -451,11 +457,28 @@ class MainWindow(QMainWindow):
 
     # --- Actions ---
 
-    def _on_open_j2download(self):
-        """Open j2download.com in the default browser for video downloading."""
-        webbrowser.open("https://j2download.com/")
-        self._log("Đã mở j2download.com trong trình duyệt.")
-        self._log("Dán link video vào trang web để tải, sau đó chọn file video bên dưới.")
+    def _on_download(self):
+        url = self.url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Lỗi", "Vui lòng nhập URL video.")
+            return
+        self._set_busy(True)
+        threading.Thread(target=self._do_download, args=(url,), daemon=True).start()
+
+    def _do_download(self, url):
+        try:
+            from downloader import VideoDownloader
+            dl = VideoDownloader()
+            path = dl.download(url, progress_callback=self.signals.progress.emit)
+            self.current_video_path = path
+            self.file_path_input.setText(path)
+            self.signals.progress.emit(f"Video đã tải: {path}")
+            # Auto-detect subtitle position
+            if self.chk_subtitles.isChecked():
+                self._detect_sub_position(path)
+            self.signals.finished.emit("download")
+        except Exception as e:
+            self.signals.error.emit(f"Lỗi tải video: {e}")
 
     def _on_browse_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -800,8 +823,10 @@ class MainWindow(QMainWindow):
 
     def _on_process_all(self):
         if not self.current_video_path:
-            QMessageBox.warning(self, "Lỗi", "Vui lòng chọn file video trước.")
-            return
+            url = self.url_input.text().strip()
+            if not url:
+                QMessageBox.warning(self, "Lỗi", "Vui lòng nhập URL hoặc chọn file video.")
+                return
 
         # Check: at least subtitles or TTS must be selected
         if not self.chk_subtitles.isChecked() and not self.chk_tts.isChecked():
@@ -829,6 +854,17 @@ class MainWindow(QMainWindow):
             want_subtitles = self.chk_subtitles.isChecked()
             want_tts = self.chk_tts.isChecked()
             want_keep_audio = self.chk_keep_audio.isChecked()
+
+            # Step 0: Download if needed
+            if not self.current_video_path:
+                url = self.url_input.text().strip()
+                self.signals.progress.emit("=== BƯỚC 0: Tải video ===")
+                from downloader import VideoDownloader
+                dl = VideoDownloader()
+                self.current_video_path = dl.download(
+                    url, progress_callback=self.signals.progress.emit
+                )
+                self.file_path_input.setText(self.current_video_path)
 
             # Step 1: Auto-detect subtitle position
             if want_subtitles:
