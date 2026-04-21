@@ -9,10 +9,11 @@ import re
 import hashlib
 import subprocess
 import tempfile
+import json
+import http.cookiejar
 import urllib.request
 import urllib.error
-import json
-import time
+import urllib.parse
 
 
 class J2DownloadClient:
@@ -26,6 +27,11 @@ class J2DownloadClient:
 
     def __init__(self):
         self.access_token = None
+        # Cookie jar to persist session cookie across requests
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cookie_jar)
+        )
 
     def _solve_pow_classic(self, challenge, nonce, difficulty):
         """
@@ -58,15 +64,17 @@ class J2DownloadClient:
         return True
 
     def _fetch_bootstrap(self):
-        """Fetch the page HTML and extract __BOOTSTRAP__ data."""
+        """Fetch the page HTML, capture session cookie, and extract __BOOTSTRAP__ data."""
         req = urllib.request.Request(
             self.BASE_URL,
             headers={
                 "User-Agent": self.USER_AGENT,
-                "Accept": "text/html",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
             },
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # Use opener to capture Set-Cookie (session cookie)
+        with self.opener.open(req, timeout=30) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
         # Extract window.__BOOTSTRAP__ = {...}
@@ -103,9 +111,9 @@ class J2DownloadClient:
             progress_callback("j2download: PoW solved, đang xác thực...")
 
         # Request access token
+        # No body, no Content-Type (matches browser axios behavior with null body)
         headers = {
             "User-Agent": self.USER_AGENT,
-            "Content-Type": "application/json",
             "X-Page-Nonce": nonce,
             "Origin": self.BASE_URL,
             "Referer": self.BASE_URL + "/",
@@ -115,12 +123,13 @@ class J2DownloadClient:
 
         req = urllib.request.Request(
             f"{self.BASE_URL}/api/auth/issue",
-            data=b"null",
+            data=b"",  # empty body for POST
             headers=headers,
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # Use opener to send session cookie
+        with self.opener.open(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8"))
 
         if "accessToken" in result:
@@ -138,7 +147,7 @@ class J2DownloadClient:
             self._get_access_token(progress_callback)
 
         if progress_callback:
-            progress_callback(f"j2download: Đang lấy link tải cho {video_url}...")
+            progress_callback(f"j2download: Đang lấy link tải...")
 
         body = json.dumps({"data": {"url": video_url, "unlock": True}}).encode()
 
@@ -155,7 +164,8 @@ class J2DownloadClient:
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        # Use opener to send session cookie
+        with self.opener.open(req, timeout=60) as resp:
             result = json.loads(resp.read().decode("utf-8"))
 
         if result.get("error"):
